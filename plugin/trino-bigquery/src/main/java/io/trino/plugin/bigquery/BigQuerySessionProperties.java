@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.bigquery;
 
+import com.google.cloud.bigquery.JobInfo.CreateDisposition;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.spi.connector.ConnectorSession;
@@ -23,11 +24,14 @@ import javax.inject.Inject;
 import java.util.List;
 
 import static io.trino.spi.session.PropertyMetadata.booleanProperty;
+import static io.trino.spi.session.PropertyMetadata.enumProperty;
 
 public final class BigQuerySessionProperties
         implements SessionPropertiesProvider
 {
     public static final String SKIP_VIEW_MATERIALIZATION = "skip_view_materialization";
+    public static final String QUERY_CACHE_ENABLED = "query_cache_enabled";
+    public static final String CREATE_DISPOSITION_TYPE = "create_disposition_type";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -40,6 +44,17 @@ public final class BigQuerySessionProperties
                         "Skip materializing views",
                         config.isSkipViewMaterialization(),
                         false))
+                .add(booleanProperty(
+                        QUERY_CACHE_ENABLED,
+                        "Enable query cache",
+                        config.isQueryCacheEnabled(),
+                        false))
+                .add(enumProperty(
+                        CREATE_DISPOSITION_TYPE,
+                        "Create disposition type",
+                        CreateDisposition.class,
+                        CreateDisposition.CREATE_IF_NEEDED,
+                        true))
                 .build();
     }
 
@@ -52,5 +67,15 @@ public final class BigQuerySessionProperties
     public static boolean isSkipViewMaterialization(ConnectorSession session)
     {
         return session.getProperty(SKIP_VIEW_MATERIALIZATION, Boolean.class);
+    }
+
+    public static boolean isQueryCacheEnabled(ConnectorSession session)
+    {
+        return session.getProperty(QUERY_CACHE_ENABLED, Boolean.class);
+    }
+
+    public static CreateDisposition createDisposition(ConnectorSession session)
+    {
+        return session.getProperty(CREATE_DISPOSITION_TYPE, CreateDisposition.class);
     }
 }

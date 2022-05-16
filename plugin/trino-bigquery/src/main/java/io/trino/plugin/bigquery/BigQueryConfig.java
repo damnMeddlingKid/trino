@@ -48,6 +48,7 @@ public class BigQueryConfig
     private boolean caseInsensitiveNameMatching;
     private Duration viewsCacheTtl = new Duration(15, MINUTES);
     private Duration serviceCacheTtl = new Duration(3, MINUTES);
+    private boolean queryCacheEnabled;
 
     public Optional<String> getProjectId()
     {
@@ -209,6 +210,18 @@ public class BigQueryConfig
     public BigQueryConfig setServiceCacheTtl(Duration serviceCacheTtl)
     {
         this.serviceCacheTtl = serviceCacheTtl;
+        return this;
+    }
+
+    public boolean isQueryCacheEnabled()
+    {
+        return queryCacheEnabled;
+    }
+
+    @Config("bigquery.query-cache.enabled")
+    public BigQueryConfig setQueryCacheEnabled(boolean queryCacheEnabled)
+    {
+        this.queryCacheEnabled = queryCacheEnabled;
         return this;
     }
 
