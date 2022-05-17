@@ -46,6 +46,7 @@ import static com.google.cloud.bigquery.TableDefinition.Type.TABLE;
 import static com.google.cloud.bigquery.TableDefinition.Type.VIEW;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.bigquery.BigQueryErrorCode.BIGQUERY_FAILED_TO_EXECUTE_QUERY;
+import static io.trino.plugin.bigquery.BigQueryUtil.isWildcardTable;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -116,6 +117,10 @@ public class BigQuerySplitManager
                 .map(column -> ((BigQueryColumnHandle) column).getName())
                 .collect(toImmutableList());
 
+        if (isWildcardTable(type, remoteTableId.getTable())) {
+            // Storage API doesn't support reading wildcard tables
+            return ImmutableList.of(BigQuerySplit.forViewStream(columns, filter));
+        }
         if (type == MATERIALIZED_VIEW) {
             // Storage API doesn't support reading materialized views
             return ImmutableList.of(BigQuerySplit.forViewStream(columns, filter));
