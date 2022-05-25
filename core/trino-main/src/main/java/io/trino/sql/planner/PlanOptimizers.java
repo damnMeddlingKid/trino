@@ -217,6 +217,7 @@ import io.trino.sql.planner.iterative.rule.SimplifyCountOverConstant;
 import io.trino.sql.planner.iterative.rule.SimplifyExpressions;
 import io.trino.sql.planner.iterative.rule.SimplifyFilterPredicate;
 import io.trino.sql.planner.iterative.rule.SingleDistinctAggregationToGroupBy;
+import io.trino.sql.planner.iterative.rule.SkewJoin;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithoutProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedGlobalAggregationWithProjection;
@@ -807,6 +808,13 @@ public class PlanOptimizers
                         // Must run after join reordering because join reordering creates
                         // new join nodes without JoinNode.maySkipOutputDuplicates flag set
                         new OptimizeDuplicateInsensitiveJoins(metadata))));
+
+        builder.add(new IterativeOptimizer(
+                plannerContext,
+                ruleStats,
+                statsCalculator,
+                costCalculator,
+                ImmutableSet.of(new SkewJoin(metadata))));
 
         if (!forceSingleNode) {
             builder.add(new ReplicateSemiJoinInDelete()); // Must run before AddExchanges

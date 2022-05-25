@@ -24,8 +24,8 @@ import io.trino.memory.MemoryManagerConfig;
 import io.trino.memory.NodeMemoryConfig;
 import io.trino.operator.RetryPolicy;
 import io.trino.spi.TrinoException;
-import io.trino.spi.type.ArrayType;
 import io.trino.spi.session.PropertyMetadata;
+import io.trino.spi.type.ArrayType;
 import io.trino.sql.planner.OptimizerConfig;
 import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy;
@@ -875,7 +875,10 @@ public final class SystemSessionProperties
     }
 
     @SuppressWarnings("unchecked")
-    public static List<List<String>> getSkewedJoinMetadata(Session session) { return session.getSystemProperty(SKEWED_JOIN_METADATA, List.class); }
+    public static List<List<String>> getSkewedJoinMetadata(Session session)
+    {
+        return session.getSystemProperty(SKEWED_JOIN_METADATA, List.class);
+    }
 
     public static int getHashPartitionCount(Session session)
     {
