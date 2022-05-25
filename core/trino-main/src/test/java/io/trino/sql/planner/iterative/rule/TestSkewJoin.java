@@ -25,7 +25,6 @@ import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.JoinNode;
@@ -37,10 +36,14 @@ import org.testng.annotations.Test;
 import java.util.Map;
 import java.util.Optional;
 
-import static io.trino.sql.planner.assertions.PlanMatchPattern.*;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.unnest;
 
-
-public class TestSkewJoin extends BaseRuleTest
+public class TestSkewJoin
+        extends BaseRuleTest
 {
     private static final CatalogName TEST_CATALOG = new CatalogName("test_push_dl_catalog");
     private TableHandle tableHandleLeft;
@@ -83,7 +86,8 @@ public class TestSkewJoin extends BaseRuleTest
     }
 
     @Test
-    public void testSkewJoin() {
+    public void testSkewJoin()
+    {
         // true result iff the condition is true
 
         tester().assertThat(new SkewJoin(tester().getMetadata()))
@@ -91,19 +95,18 @@ public class TestSkewJoin extends BaseRuleTest
                         JoinNode.Type.INNER,
                         p.tableScan(tableHandleLeft, ImmutableList.of(p.symbol("column_0")), ImmutableMap.of(p.symbol("column_0"), left)),
                         p.tableScan(tableHandleRight, ImmutableList.of(p.symbol("column_1")), ImmutableMap.of(p.symbol("column_1"), right)),
-                        new JoinNode.EquiJoinClause(p.symbol("column_0"), p.symbol("column_1"))
-                ))
+                        new JoinNode.EquiJoinClause(p.symbol("column_0"), p.symbol("column_1"))))
                 .matches(
                         project(
                                 join(
                                         JoinNode.Type.INNER,
                                         ImmutableList.of(
-                                            equiJoinClause("column_0", "column_1"),
-                                            equiJoinClause("randpart", "skewpart")),
+                                                equiJoinClause("column_0", "column_1"),
+                                                equiJoinClause("randpart", "skewpart")),
                                         project(
                                                 tableScan("A", ImmutableMap.of("column_0", "column_0", "randpart", "randpart"))),
                                         unnest(
                                                 project(
-                                                    tableScan("B", ImmutableMap.of("column_1", "column_1")))))));
+                                                        tableScan("B", ImmutableMap.of("column_1", "column_1")))))));
     }
 }

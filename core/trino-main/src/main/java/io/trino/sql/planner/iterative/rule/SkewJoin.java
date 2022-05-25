@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.metadata.Metadata;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.IntegerType;
 import io.trino.sql.planner.FunctionCallBuilder;
@@ -33,13 +34,12 @@ import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.UnnestNode;
 import io.trino.sql.tree.ArrayConstructor;
 import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.IfExpression;
 import io.trino.sql.tree.FunctionCall;
+import io.trino.sql.tree.IfExpression;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.QualifiedName;
-import io.trino.metadata.Metadata;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.SymbolReference;
 
@@ -53,6 +53,7 @@ import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.plan.Patterns.Join.left;
 import static io.trino.sql.planner.plan.Patterns.Join.right;
 import static io.trino.sql.planner.plan.Patterns.tableScan;
+import static io.trino.SystemSessionProperties.getSkewedJoinMetadata;
 import static java.util.Objects.requireNonNull;
 
 public class SkewJoin
@@ -84,12 +85,12 @@ public class SkewJoin
         return PATTERN;
     }
 
-    private Expression ifSkewed(SymbolReference keyColumn, Expression then, Expression otherWise) {
+    private Expression ifSkewed(SymbolReference keyColumn, Expression then, Expression otherWise)
+    {
         return new IfExpression(
                 new InPredicate(keyColumn, new InListExpression(this.skewedValues)),
                 then,
-                otherWise
-        );
+                otherWise);
     }
 
     private ProjectNode projectProbeSide(TableScanNode probe, Symbol randomPartSymbol, Context context)
@@ -138,8 +139,8 @@ public class SkewJoin
                 Optional.empty());
     }
 
-    private JoinNode rewriteJoinClause(JoinNode node, ProjectNode leftSource, Symbol leftKey, UnnestNode rightSource, Symbol rightKey, Context context) {
-
+    private JoinNode rewriteJoinClause(JoinNode node, ProjectNode leftSource, Symbol leftKey, UnnestNode rightSource, Symbol rightKey, Context context)
+    {
         List<EquiJoinClause> criteria = Stream
                 .concat(node.getCriteria().stream(), Stream.of(new JoinNode.EquiJoinClause(leftKey, rightKey)))
                 .collect(Collectors.toUnmodifiableList());
@@ -162,7 +163,8 @@ public class SkewJoin
                 node.getReorderJoinStatsAndCost());
     }
 
-    private ProjectNode dropPartSymbols(JoinNode node, ImmutableSet<Symbol> symbolsToRemove, Context context) {
+    private ProjectNode dropPartSymbols(JoinNode node, ImmutableSet<Symbol> symbolsToRemove, Context context)
+    {
         ImmutableList<Symbol> newOutputSymbols = node.getOutputSymbols().stream()
                 .filter(symbol -> !symbolsToRemove.contains(symbol))
                 .collect(toImmutableList());
@@ -172,7 +174,8 @@ public class SkewJoin
         return new ProjectNode(context.getIdAllocator().getNextId(), node, assignments);
     }
 
-    private SymbolReference getSkewedRightKey(JoinNode joinNode, SymbolReference skewedLeftKey) {
+    private SymbolReference getSkewedRightKey(JoinNode joinNode, SymbolReference skewedLeftKey)
+    {
         List<EquiJoinClause> criteria = joinNode.getCriteria();
         Optional<EquiJoinClause> skewedClause = criteria.stream().filter(clause -> clause.getLeft().toSymbolReference().equals(skewedLeftKey)).findFirst();
         return skewedClause.get().getRight().toSymbolReference();
@@ -185,10 +188,16 @@ public class SkewJoin
         TableScanNode leftNode = captures.get(LEFT_TABLE_SCAN);
         TableScanNode rightNode = captures.get(RIGHT_TABLE_SCAN);
 
+        if(joinNode.getType() != JoinNode.Type.INNER || joinNode.getType() != JoinNode.Type.LEFT ) {
+            Result.empty();
+        }
+
+        List<List<String>> skewedJoinMetadata = getSkewedJoinMetadata(context.getSession());
+
         skewedLeftKey = leftNode.getOutputSymbols().stream() // DIRTY HACK, TODO: GET THIS FROM SESSION VARIABLE LOGIC
                 .filter(symbol -> symbol.getName().startsWith("primary_key"))
                 .collect(Collectors.toList()).get(0).toSymbolReference();
-                
+
         skewedRightKey = getSkewedRightKey(joinNode, skewedLeftKey); // TODO: Don't use an instance var for this.
 
         Symbol randomPartSymbol = context.getSymbolAllocator().newSymbol("randPart", IntegerType.INTEGER);
