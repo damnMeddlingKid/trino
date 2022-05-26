@@ -809,13 +809,6 @@ public class PlanOptimizers
                         // new join nodes without JoinNode.maySkipOutputDuplicates flag set
                         new OptimizeDuplicateInsensitiveJoins(metadata))));
 
-        builder.add(new IterativeOptimizer(
-                plannerContext,
-                ruleStats,
-                statsCalculator,
-                costCalculator,
-                ImmutableSet.of(new SkewJoin(metadata))));
-
         if (!forceSingleNode) {
             builder.add(new ReplicateSemiJoinInDelete()); // Must run before AddExchanges
             builder.add(new IterativeOptimizer(
@@ -856,6 +849,14 @@ public class PlanOptimizers
             builder.add(new UnaliasSymbolReferences(metadata));
             builder.add(new StatsRecordingPlanOptimizer(optimizerStats, new AddExchanges(plannerContext, typeAnalyzer, statsCalculator)));
         }
+
+        // We need to run this after join reordering and determining the join distribution type.
+        builder.add(new IterativeOptimizer(
+                plannerContext,
+                ruleStats,
+                statsCalculator,
+                costCalculator,
+                ImmutableSet.of(new SkewJoin(metadata))));
 
         // use cost calculator without estimated exchanges after AddExchanges
         costCalculator = costCalculatorWithoutEstimatedExchanges;
