@@ -28,6 +28,8 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.PlanNode;
+import io.trino.sql.planner.plan.UnnestNode;
 import io.trino.testing.LocalQueryRunner;
 import io.trino.testing.TestingSession;
 import org.testng.annotations.BeforeClass;
@@ -36,7 +38,9 @@ import org.testng.annotations.Test;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.sql.planner.assertions.PlanMatchPattern.UnnestMapping.unnestMapping;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
@@ -72,9 +76,11 @@ public class TestSkewJoin
         Session defaultSession = TestingSession.testSessionBuilder()
                 .setCatalog(TEST_CATALOG.getCatalogName())
                 .setSchema("tiny")
+                .setSystemProperty("skewed_join_metadata", "[[\"test_push_dl_catalog.left.a\", \"column_0\", \"1\", \"2\"]]")
                 .build();
 
-        LocalQueryRunner queryRunner = LocalQueryRunner.create(defaultSession);
+        LocalQueryRunner.Builder runnerBuilder = LocalQueryRunner.builder(defaultSession);
+        LocalQueryRunner queryRunner = runnerBuilder.build();
 
         queryRunner.createCatalog(
                 TEST_CATALOG.getCatalogName(),
@@ -88,25 +94,37 @@ public class TestSkewJoin
     @Test
     public void testSkewJoin()
     {
-        // true result iff the condition is true
-
         tester().assertThat(new SkewJoin(tester().getMetadata()))
-                .on(p -> p.join(
-                        JoinNode.Type.INNER,
-                        p.tableScan(tableHandleLeft, ImmutableList.of(p.symbol("column_0")), ImmutableMap.of(p.symbol("column_0"), left)),
-                        p.tableScan(tableHandleRight, ImmutableList.of(p.symbol("column_1")), ImmutableMap.of(p.symbol("column_1"), right)),
-                        new JoinNode.EquiJoinClause(p.symbol("column_0"), p.symbol("column_1"))))
+                .on(p -> {
+                    PlanNode leftTableScan = p.tableScan(tableHandleLeft, ImmutableList.of(p.symbol("column_0")), ImmutableMap.of(p.symbol("column_0"), left));
+                    PlanNode rightTableScan = p.tableScan(tableHandleRight, ImmutableList.of(p.symbol("column_1")), ImmutableMap.of(p.symbol("column_1"), right));
+                    return p.join(
+                            JoinNode.Type.INNER,
+                            leftTableScan,
+                            rightTableScan,
+                            ImmutableList.of(new JoinNode.EquiJoinClause(p.symbol("column_0"), p.symbol("column_1"))),
+                            leftTableScan.getOutputSymbols(),
+                            rightTableScan.getOutputSymbols(),
+                            Optional.empty(),
+                            Optional.empty(),
+                            Optional.empty(),
+                            Optional.of(JoinNode.DistributionType.PARTITIONED),
+                            ImmutableMap.of()
+                    );
+                })
                 .matches(
                         project(
                                 join(
                                         JoinNode.Type.INNER,
                                         ImmutableList.of(
                                                 equiJoinClause("column_0", "column_1"),
-                                                equiJoinClause("randpart", "skewpart")),
-                                        project(
-                                                tableScan("A", ImmutableMap.of("column_0", "column_0", "randpart", "randpart"))),
+                                                equiJoinClause("randPart", "skewPart")),
+                                        project(ImmutableMap.of("randPart", expression("IF((\"column_0\" IN (CAST('1' AS varchar), CAST('2' AS varchar))), random(2), 0)"), "column_0", expression("column_0")),
+                                                tableScan("A", ImmutableMap.of("column_0", "column_0"))),
                                         unnest(
-                                                project(
+                                                ImmutableList.of("column_1"),
+                                                ImmutableList.of(unnestMapping("skewPartitioner", ImmutableList.of("skewPart"))),
+                                                project(ImmutableMap.of("skewPartitioner", expression("IF((\"column_1\" IN (CAST('1' AS varchar), CAST('2' AS varchar))), ARRAY[0,1,2], ARRAY[0])"), "column_1", expression("column_1")),
                                                         tableScan("B", ImmutableMap.of("column_1", "column_1")))))));
     }
 }

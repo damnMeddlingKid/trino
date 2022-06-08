@@ -13,8 +13,11 @@
  */
 package io.trino.sql.planner.assertions;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Streams;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArithmeticUnaryExpression;
+import io.trino.sql.tree.ArrayConstructor;
 import io.trino.sql.tree.AstVisitor;
 import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BooleanLiteral;
@@ -206,6 +209,23 @@ public final class ExpressionVerifier
         }
 
         throw new IllegalArgumentException("Unsupported literal expression type: " + expression.getClass().getName());
+    }
+
+    @Override
+    protected Boolean visitArrayConstructor(ArrayConstructor actual, Node expectedExpression)
+    {
+        if (!(expectedExpression instanceof ArrayConstructor)) {
+            return false;
+        }
+
+        ArrayConstructor expected = ((ArrayConstructor) expectedExpression);
+
+        if (actual.getValues().size() != expected.getValues().size()) {
+            return false;
+        }
+
+        return Streams.zip(actual.getValues().stream(), expected.getValues().stream(), this::process)
+                .reduce((a, e) -> a && e).orElse(false);
     }
 
     @Override
