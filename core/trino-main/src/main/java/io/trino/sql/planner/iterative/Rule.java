@@ -27,6 +27,7 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
+
 public interface Rule<T>
 {
     /**

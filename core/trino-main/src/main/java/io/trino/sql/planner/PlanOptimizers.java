@@ -218,6 +218,7 @@ import io.trino.sql.planner.iterative.rule.SimplifyExpressions;
 import io.trino.sql.planner.iterative.rule.SimplifyFilterPredicate;
 import io.trino.sql.planner.iterative.rule.SingleDistinctAggregationToGroupBy;
 import io.trino.sql.planner.iterative.rule.SkewJoin;
+import io.trino.sql.planner.iterative.rule.SkewJoinOptimizer;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithoutProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedGlobalAggregationWithProjection;
@@ -851,12 +852,14 @@ public class PlanOptimizers
         }
 
         // We need to run this after join reordering and determining the join distribution type.
-        builder.add(new IterativeOptimizer(
-                plannerContext,
-                ruleStats,
-                statsCalculator,
-                costCalculator,
-                ImmutableSet.of(new SkewJoin(metadata))));
+//        builder.add(new IterativeOptimizer(
+//                plannerContext,
+//                ruleStats,
+//                statsCalculator,
+//                costCalculator,
+//                ImmutableSet.of(new SkewJoin(metadata))));
+
+        builder.add(new SkewJoinOptimizer(metadata));
 
         // use cost calculator without estimated exchanges after AddExchanges
         costCalculator = costCalculatorWithoutEstimatedExchanges;

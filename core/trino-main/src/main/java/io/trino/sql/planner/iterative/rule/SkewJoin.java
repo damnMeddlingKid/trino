@@ -75,9 +75,7 @@ public class SkewJoin
     private static final Capture<TableScanNode> RIGHT_TABLE_SCAN = newCapture();
 
     private static final Pattern<JoinNode> PATTERN =
-            Patterns.join()
-                    .with(left().matching(tableScan().capturedAs(LEFT_TABLE_SCAN)))
-                    .with(right().matching(tableScan().capturedAs(RIGHT_TABLE_SCAN)));
+            Patterns.join();
 
     private Metadata metadata;
 

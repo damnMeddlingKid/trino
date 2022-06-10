@@ -58,6 +58,7 @@ import static io.trino.util.Failures.checkCondition;
 import static java.lang.Character.MAX_CODE_POINT;
 import static java.lang.Character.SURROGATE;
 import static java.lang.Math.abs;
+import static java.lang.Math.addExact;
 import static java.lang.Math.toIntExact;
 
 /**
@@ -881,6 +882,29 @@ public final class StringFunctions
     }
 
     // TODO: implement N arguments char concat
+
+    @Description("Concatenates given character strings")
+    @ScalarFunction("concat")
+    @LiteralParameters({"x", "y", "u"})
+    @Constraint(variable = "u", expression = "x + y")
+    @SqlType("varchar(u)")
+    public static Slice concat2(@LiteralParameter("x") Long x, @SqlType("varchar(x)") Slice left, @SqlType("char(y)") Slice right)
+    {
+        // Validate the concatenation length
+        int length = 0;
+        length = addExact(length, left.length());
+        length = addExact(length, right.length());
+
+        // Construct the result
+        Slice result = Slices.allocate(length);
+        int position = 0;
+        result.setBytes(position, left);
+        position += left.length();
+        result.setBytes(position, right);
+
+        return result;
+    }
+
     @Description("Concatenates given character strings")
     @ScalarFunction
     @LiteralParameters({"x", "y", "u"})
