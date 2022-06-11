@@ -18,11 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.matching.Capture;
-import io.trino.matching.Captures;
-import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
-import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.IntegerType;
@@ -31,13 +27,11 @@ import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
-import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.ProjectNode;
@@ -56,7 +50,6 @@ import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.SymbolReference;
-import io.trino.sql.tree.Table;
 import org.assertj.core.util.VisibleForTesting;
 import oshi.util.tuples.Pair;
 
@@ -65,27 +58,32 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SystemSessionProperties.getSkewedJoinMetadata;
-import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static java.util.Objects.requireNonNull;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
 
+
+// TODO: refactor this. This is gross
 class SkewedContext {
-    private TableScanNode table;
+    public TableScanNode table;
+    public DataType keyType;
+    public List<String> values;
     public Set<Symbol> skewedSymbols;
 
     public SkewedContext() {
-        this.table = null;
         this.skewedSymbols = new HashSet<>();
     }
 
-    public void setTable(TableScanNode table) {
+    public void setTable(TableScanNode table, DataType keyType, List<String> values) {
         this.table = table;
+        this.keyType = keyType;
+        this.values = values;
     }
 }
 
@@ -102,18 +100,38 @@ public class SkewJoinOptimizer
     @Override
     public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
-        return new Rewriter(session, metadata).visitPlan(plan, new SkewedContext());
+        List<List<String>> skewedJoinMetadata = getSkewedJoinMetadata(session);
+
+        if(skewedJoinMetadata.size() == 0) {
+            // No session information found, nothing to do.
+            return plan;
+        }
+
+        Map<String, SkewJoinConfig> skewedTables = skewedJoinMetadata.stream()
+                .map(SkewJoinConfig::getMetadata)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .collect(Collectors.toMap(SkewJoinConfig::getTableName, Function.identity()));
+
+        JoinRewriter rewriter = new JoinRewriter(metadata, idAllocator, symbolAllocator, session);
+
+        return new PlanRewriter(session, metadata, skewedTables, rewriter).visitPlan(plan, new SkewedContext());
     }
 
-    private class Rewriter extends PlanVisitor<PlanNode, SkewedContext>
+    private class PlanRewriter
+            extends PlanVisitor<PlanNode, SkewedContext>
     {
         private final Session session;
         private final Metadata metadata;
+        private final JoinRewriter joinRewriter;
+        private final Map<String, SkewJoinConfig> skewedTables;
 
-        public Rewriter(Session session, Metadata metadata)
+        public PlanRewriter(Session session, Metadata metadata, Map<String, SkewJoinConfig> skewedTables, JoinRewriter rewriter)
         {
             this.session = session;
             this.metadata = metadata;
+            this.skewedTables = skewedTables;
+            this.joinRewriter = rewriter;
         }
 
         public PlanNode passThrough(PlanNode node, SkewedContext context) {
@@ -125,12 +143,28 @@ public class SkewJoinOptimizer
         @Override
         public PlanNode visitJoin(JoinNode node, SkewedContext context)
         {
+            // TODO : how do range joins behave ?
             SkewedContext leftCtx = new SkewedContext();
             SkewedContext rightCtx = new SkewedContext();
-            PlanNode leftNode = node.getLeft().accept(this, leftCtx);
-            PlanNode rightNode = node.getRight().accept(this, rightCtx);
-            //node.getOutputSymbols().stream().map(symbol -> skewedSymbols.put(symbol, null));
-            return node;
+
+            PlanNode leftReWritten = node.getLeft().accept(this, leftCtx);
+            PlanNode rightReWritten = node.getRight().accept(this, rightCtx);
+
+            JoinNode newJoin = this.joinRewriter.rewriteJoin(node, leftReWritten, rightReWritten, Stream.empty());
+
+            if(leftCtx.skewedSymbols.size() > 0) {
+                Optional<SymbolReference> skewedLeftKey = newJoin.getCriteria().stream()
+                        .map(JoinNode.EquiJoinClause::getLeft)
+                        .filter(symbol->leftCtx.skewedSymbols.contains(symbol))
+                        .map(Symbol::toSymbolReference)
+                        .findFirst();
+
+                if(skewedLeftKey.isPresent()) {
+                    return this.joinRewriter.rewriteSkewedJoin(newJoin, skewedLeftKey.get(), leftCtx);
+                }
+            }
+
+            return newJoin;
         }
 
         @Override
@@ -143,13 +177,15 @@ public class SkewJoinOptimizer
             return passThrough(node, context);
         }
 
-//        @Override
-//        public PlanNode visitExchange(ExchangeNode node, SkewedContext context) {
-//            // TODO
-//            return null;
-//        }
+        @Override
+        public PlanNode visitExchange(ExchangeNode node, SkewedContext context) {
+            // TODO correctly handle this
+            // for now passthrough the exchange node
+            List<PlanNode> children = node.getSources().stream().map(child -> child.accept(this, context)).collect(Collectors.toList());
+            return replaceChildren(node, children);
+        }
 
-// Amogh's project
+// Amogh's project, i believe this removes symbols from the context if they are not in the project. not sure if neeeded, lets discuss
 //        @Override
 //        public PlanNode visitProject(ProjectNode node, Set<SimpleSkewedTableScan> context) {
 //            context.forEach(table -> table.skewedSymbols = table.skewedSymbols.stream()
@@ -165,11 +201,9 @@ public class SkewJoinOptimizer
 
         @Override
         public PlanNode visitProject(ProjectNode node, SkewedContext context) {
-            // select primary_key = primary_key % 23; x
-            // select primary_key = primary_key + 'sds'; x
-            // select primary_key as foo, ok
-            // set skew_join_metadata = ARRAY['table', 'col', '1', '9']
-            // todo check how alias is represented in the assignments
+            /*
+                If any symbol assignments refers to a skewed symbol then add that symbol to the set of skewed symbols.
+            * */
             PlanNode child = node.getSource().accept(this, context);
             node.getAssignments().entrySet()
                     .forEach(entry -> {
@@ -197,17 +231,18 @@ public class SkewJoinOptimizer
         public PlanNode visitTableScan(TableScanNode node, SkewedContext context)
         {
             final String qualifiedTableName = metadata.getTableMetadata(session, node.getTable()).getQualifiedName().toString();
-            final Optional<SkewJoinConfig> skewJoinConfig = SkewJoinConfig.getMetadata(qualifiedTableName, session);
 
-            if(skewJoinConfig.isPresent()) {
-                SkewJoinConfig skewConfig = skewJoinConfig.get();
-                Optional<Map.Entry<Symbol, ColumnHandle>> symbolAndMetadata = node.getAssignments().entrySet().stream()
-                        .filter(entry -> {
-                            ColumnMetadata meta = metadata.getColumnMetadata(session, node.getTable(), entry.getValue());
-                            return meta.getName().equals(skewConfig.getColumnName());
-                        })
+            if(this.skewedTables.containsKey(qualifiedTableName)) {
+                SkewJoinConfig skewConfig = this.skewedTables.get(qualifiedTableName);
+                Optional<Pair<Symbol, ColumnMetadata>> symbolAndMetadata = node.getAssignments().entrySet().stream()
+                        .map(entry -> new Pair<>(entry.getKey(),  metadata.getColumnMetadata(session, node.getTable(), entry.getValue())))
+                        .filter(entry -> entry.getB().getName().equals(skewConfig.getColumnName()))
                         .findFirst();
-                symbolAndMetadata.ifPresent(m -> {context.skewedSymbols.add(m.getKey()); context.setTable(node);});
+                symbolAndMetadata.ifPresent(m -> {
+                    // TODO Refactor this, its gross
+                    context.skewedSymbols.add(m.getA());
+                    context.setTable(node, toSqlType(m.getB().getType()), skewConfig.values);
+                });
             }
 
             return node;
@@ -234,7 +269,7 @@ public class SkewJoinOptimizer
         {
             tableName = rawMetadata.get(TABLE_INDEX);
             columnName = rawMetadata.get(COLUMN_INDEX);
-            values = rawMetadata.subList(VALUE_INDEX, rawMetadata.size());
+            values = ImmutableList.copyOf(rawMetadata.subList(VALUE_INDEX, rawMetadata.size()));
         }
 
         public String getTableName()
@@ -252,38 +287,28 @@ public class SkewJoinOptimizer
             return values;
         }
 
-        private static Optional<List<String>> getSkewedTableMetadata(String skewedTableName, Session session)
+        static Optional<SkewJoinConfig> getMetadata(List<String> rawMetadata)
         {
-            List<List<String>> skewedJoinMetadata = getSkewedJoinMetadata(session);
-
-            return skewedJoinMetadata.stream()
-                    .filter(metadata -> metadata.get(TABLE_INDEX).equals(skewedTableName))
-                    .findFirst();
-        }
-
-        static Optional<SkewJoinConfig> getMetadata(String skewedTableName, Session session)
-        {
-            Optional<List<String>> rawMetadata = getSkewedTableMetadata(skewedTableName, session);
-
-            if (rawMetadata.isEmpty() || rawMetadata.get().size() < MIN_SIZE) {
+            if (rawMetadata.size() < MIN_SIZE) {
                 return Optional.empty();
             }
 
-            return Optional.of(new SkewJoinConfig(rawMetadata.get()));
+            return Optional.of(new SkewJoinConfig(rawMetadata));
         }
     }
 
     class JoinRewriter
     {
+        // TODO make this configurable
         private final LongLiteral MAX_REPLICATION_FACTOR = new LongLiteral("2");
         private final LongLiteral DEFAULT_PROJECT_VALUE = new LongLiteral("0");
         private final ArrayConstructor ARRAY_PARTITIONER = new ArrayConstructor(ImmutableList.of(new LongLiteral("0"), new LongLiteral("1"), new LongLiteral("2")));
         private final ArrayConstructor DEFAULT_UNNEST_VALUE = new ArrayConstructor(ImmutableList.of(DEFAULT_PROJECT_VALUE));
 
-        private Metadata metadata;
-        private PlanNodeIdAllocator idAllocator;
-        private SymbolAllocator symbolAllocator;
-        private Session session;
+        private final Metadata metadata;
+        private final PlanNodeIdAllocator idAllocator;
+        private final SymbolAllocator symbolAllocator;
+        private final Session session;
 
         public JoinRewriter(Metadata metadata, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
         {
@@ -301,19 +326,9 @@ public class SkewJoinOptimizer
                     otherWise);
         }
 
-        private Optional<Pair<Symbol, ColumnMetadata>> getLeftSymbolAndMetadata(TableScanNode leftNode, String skewedColumnName)
-        {
-            return leftNode.getAssignments().entrySet().stream()
-                    .map(entry -> {
-                        ColumnMetadata meta = metadata.getColumnMetadata(session, leftNode.getTable(), entry.getValue());
-                        return new Pair<>(entry.getKey(), meta);
-                    })
-                    .filter(pair -> pair.getB().getName().equals(skewedColumnName))
-                    .findFirst();
-        }
-
         private SymbolReference getRightSymbol(JoinNode joinNode, SymbolReference skewedLeftKey)
         {
+            // TODO Might be able to remove this
             List<JoinNode.EquiJoinClause> criteria = joinNode.getCriteria();
             Optional<JoinNode.EquiJoinClause> skewedClause = criteria.stream().filter(clause -> clause.getLeft().toSymbolReference().equals(skewedLeftKey)).findFirst();
             return skewedClause.get().getRight().toSymbolReference();
@@ -359,10 +374,26 @@ public class SkewJoinOptimizer
                     Optional.empty());
         }
 
+        private ProjectNode dropAddedSymbols(JoinNode node, ImmutableSet<Symbol> symbolsToRemove)
+        {
+            ImmutableList<Symbol> newOutputSymbols = node.getOutputSymbols().stream()
+                    .filter(symbol -> !symbolsToRemove.contains(symbol))
+                    .collect(toImmutableList());
+
+            Assignments assignments = Assignments.builder().putIdentities(newOutputSymbols).build();
+
+            return new ProjectNode(idAllocator.getNextId(), node, assignments);
+        }
+
         private JoinNode rewriteJoinClause(JoinNode node, ProjectNode leftSource, Symbol leftKey, UnnestNode rightSource, Symbol rightKey)
         {
+            return rewriteJoin(node, leftSource, rightSource, Stream.of(new JoinNode.EquiJoinClause(leftKey, rightKey)));
+        }
+
+        public JoinNode rewriteJoin(JoinNode node, PlanNode leftSource, PlanNode rightSource, Stream<JoinNode.EquiJoinClause> additionalClause)
+        {
             List<JoinNode.EquiJoinClause> criteria = Stream
-                    .concat(node.getCriteria().stream(), Stream.of(new JoinNode.EquiJoinClause(leftKey, rightKey)))
+                    .concat(node.getCriteria().stream(), additionalClause)
                     .collect(Collectors.toUnmodifiableList());
 
             return new JoinNode(
@@ -383,18 +414,7 @@ public class SkewJoinOptimizer
                     node.getReorderJoinStatsAndCost());
         }
 
-        private ProjectNode dropAddedSymbols(JoinNode node, ImmutableSet<Symbol> symbolsToRemove)
-        {
-            ImmutableList<Symbol> newOutputSymbols = node.getOutputSymbols().stream()
-                    .filter(symbol -> !symbolsToRemove.contains(symbol))
-                    .collect(toImmutableList());
-
-            Assignments assignments = Assignments.builder().putIdentities(newOutputSymbols).build();
-
-            return new ProjectNode(idAllocator.getNextId(), node, assignments);
-        }
-
-        public PlanNode apply(JoinNode joinNode, SymbolReference skewedLeftKey, DataType skewedLeftType, List<String> skewedValues)
+        public PlanNode rewriteSkewedJoin(JoinNode joinNode, SymbolReference skewedLeftKey, SkewedContext context)
         {
             if (joinNode.getDistributionType().isEmpty() || joinNode.getDistributionType().get() != JoinNode.DistributionType.PARTITIONED) {
                 // Only optimize partitioned joins
@@ -407,9 +427,9 @@ public class SkewJoinOptimizer
             }
 
             final SymbolReference skewedRightKey = getRightSymbol(joinNode, skewedLeftKey);
-            final List<Expression> skewedExpressionValues = skewedValues.stream()
+            final List<Expression> skewedExpressionValues = context.values.stream()
                     .map(StringLiteral::new)
-                    .map(literal -> new Cast(literal, skewedLeftType))
+                    .map(literal -> new Cast(literal, context.keyType))
                     .collect(Collectors.toList());
 
             final Symbol randomPartSymbol = symbolAllocator.newSymbol("randPart", IntegerType.INTEGER);
