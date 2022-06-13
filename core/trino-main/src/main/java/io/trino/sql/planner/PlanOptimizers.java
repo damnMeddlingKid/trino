@@ -217,7 +217,6 @@ import io.trino.sql.planner.iterative.rule.SimplifyCountOverConstant;
 import io.trino.sql.planner.iterative.rule.SimplifyExpressions;
 import io.trino.sql.planner.iterative.rule.SimplifyFilterPredicate;
 import io.trino.sql.planner.iterative.rule.SingleDistinctAggregationToGroupBy;
-import io.trino.sql.planner.iterative.rule.SkewJoin;
 import io.trino.sql.planner.iterative.rule.SkewJoinOptimizer;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithProjection;
 import io.trino.sql.planner.iterative.rule.TransformCorrelatedDistinctAggregationWithoutProjection;
@@ -850,14 +849,6 @@ public class PlanOptimizers
             builder.add(new UnaliasSymbolReferences(metadata));
             builder.add(new StatsRecordingPlanOptimizer(optimizerStats, new AddExchanges(plannerContext, typeAnalyzer, statsCalculator)));
         }
-
-        // We need to run this after join reordering and determining the join distribution type.
-//        builder.add(new IterativeOptimizer(
-//                plannerContext,
-//                ruleStats,
-//                statsCalculator,
-//                costCalculator,
-//                ImmutableSet.of(new SkewJoin(metadata))));
 
         builder.add(new SkewJoinOptimizer(metadata));
 

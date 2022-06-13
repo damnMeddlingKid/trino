@@ -115,7 +115,7 @@ public class SkewJoinOptimizer
 
         JoinRewriter rewriter = new JoinRewriter(metadata, idAllocator, symbolAllocator, session);
 
-        return new PlanRewriter(session, metadata, skewedTables, rewriter).visitPlan(plan, new SkewedContext());
+        return plan.accept(new PlanRewriter(session, metadata, skewedTables, rewriter), new SkewedContext());
     }
 
     private class PlanRewriter
@@ -204,6 +204,7 @@ public class SkewJoinOptimizer
             /*
                 If any symbol assignments refers to a skewed symbol then add that symbol to the set of skewed symbols.
             * */
+            // TODO Remove symbols that are unused.
             PlanNode child = node.getSource().accept(this, context);
             node.getAssignments().entrySet()
                     .forEach(entry -> {
@@ -236,7 +237,7 @@ public class SkewJoinOptimizer
                 SkewJoinConfig skewConfig = this.skewedTables.get(qualifiedTableName);
                 Optional<Pair<Symbol, ColumnMetadata>> symbolAndMetadata = node.getAssignments().entrySet().stream()
                         .map(entry -> new Pair<>(entry.getKey(),  metadata.getColumnMetadata(session, node.getTable(), entry.getValue())))
-                        .filter(entry -> entry.getB().getName().equals(skewConfig.getColumnName()))
+                        .filter(entry -> entry.getA().getName().equals(skewConfig.getColumnName()) || entry.getB().getName().equals(skewConfig.getColumnName()))
                         .findFirst();
                 symbolAndMetadata.ifPresent(m -> {
                     // TODO Refactor this, its gross
@@ -245,7 +246,7 @@ public class SkewJoinOptimizer
                 });
             }
 
-            return node;
+             return node;
         }
     }
 
