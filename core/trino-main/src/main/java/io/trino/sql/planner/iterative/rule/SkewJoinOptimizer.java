@@ -112,7 +112,7 @@ public class SkewJoinOptimizer
         return plan.accept(new PlanRewriter(session, metadata, skewedTables, rewriter), new HashMap<>());
     }
 
-    private class PlanRewriter
+    static class PlanRewriter
             extends PlanVisitor<PlanNode, Map<Symbol, SkewedContext>>
     {
         private final Session session;
@@ -149,14 +149,13 @@ public class SkewJoinOptimizer
             JoinNode newJoin = this.joinRewriter.rewriteJoin(node, leftReWritten, rightReWritten, Stream.empty());
 
             if (leftCtx.size() > 0) {
-                Optional<Symbol> leftKey = newJoin.getCriteria().stream()
-                        .map(JoinNode.EquiJoinClause::getLeft)
-                        .filter(leftCtx::containsKey)
+                Optional<JoinNode.EquiJoinClause> maybeClause = newJoin.getCriteria().stream()
+                        .filter(clause -> leftCtx.containsKey(clause.getLeft()))
                         .findFirst();
 
-                if (leftKey.isPresent()) {
-                    Symbol skewedLeftKey = leftKey.get();
-                    return this.joinRewriter.rewriteSkewedJoin(newJoin, skewedLeftKey.toSymbolReference(), leftCtx.get(skewedLeftKey));
+                if (maybeClause.isPresent()) {
+                    JoinNode.EquiJoinClause skewedClause = maybeClause.get();
+                    return this.joinRewriter.rewriteSkewedJoin(newJoin, skewedClause, leftCtx.get(skewedClause.getLeft()));
                 }
             }
 
@@ -304,7 +303,7 @@ public class SkewJoinOptimizer
         }
     }
 
-    class JoinRewriter
+    static class JoinRewriter
     {
         // TODO make this configurable
         private final LongLiteral MAX_REPLICATION_FACTOR = new LongLiteral("2");
@@ -331,14 +330,6 @@ public class SkewJoinOptimizer
                     new InPredicate(keyColumn, new InListExpression(skewedValues)),
                     then,
                     otherWise);
-        }
-
-        private SymbolReference getRightSymbol(JoinNode joinNode, SymbolReference skewedLeftKey)
-        {
-            // TODO Might be able to remove this
-            List<JoinNode.EquiJoinClause> criteria = joinNode.getCriteria();
-            Optional<JoinNode.EquiJoinClause> skewedClause = criteria.stream().filter(clause -> clause.getLeft().toSymbolReference().equals(skewedLeftKey)).findFirst();
-            return skewedClause.get().getRight().toSymbolReference();
         }
 
         private ProjectNode projectProbeSide(PlanNode probe, SymbolReference skewedLeftKey, List<Expression> inSkewedValues, Symbol randomPartSymbol)
@@ -421,7 +412,7 @@ public class SkewJoinOptimizer
                     node.getReorderJoinStatsAndCost());
         }
 
-        public PlanNode rewriteSkewedJoin(JoinNode joinNode, SymbolReference skewedLeftKey, SkewedContext context)
+        public PlanNode rewriteSkewedJoin(JoinNode joinNode, JoinNode.EquiJoinClause skewedClause, SkewedContext context)
         {
             if (joinNode.getDistributionType().isEmpty() || joinNode.getDistributionType().get() != JoinNode.DistributionType.PARTITIONED) {
                 // Only optimize partitioned joins
@@ -433,7 +424,8 @@ public class SkewJoinOptimizer
                 return joinNode;
             }
 
-            final SymbolReference skewedRightKey = getRightSymbol(joinNode, skewedLeftKey);
+            final SymbolReference skewedLeftKey = skewedClause.getLeft().toSymbolReference();
+            final SymbolReference skewedRightKey = skewedClause.getRight().toSymbolReference();
             final List<Expression> skewedExpressionValues = context.values.stream()
                     .map(StringLiteral::new)
                     .map(literal -> new Cast(literal, context.keyType))
