@@ -51,7 +51,7 @@ public class TestSkewJoinOptimizer extends BasePlanTest
     private TableScanNode ordersTableScanNode;
 
     public TestSkewJoinOptimizer() {
-        super(ImmutableMap.of("skewed_join_metadata", "[[\"local.sf1.orders\", \"ORDERS_OK\", \"1\", \"2\"]]"));
+        super(ImmutableMap.of("skewed_join_metadata", "[[\"local.sf1.orders\", \"orderkey\", \"1\", \"2\"]]"));
     }
 
     @BeforeClass

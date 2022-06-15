@@ -53,6 +53,7 @@ import io.trino.sql.tree.SymbolReference;
 import org.assertj.core.util.VisibleForTesting;
 import oshi.util.tuples.Pair;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -68,20 +69,13 @@ import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static java.util.Objects.requireNonNull;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
 
+class SkewedContext
+{
+    public final DataType keyType;
+    public final List<String> values;
 
-// TODO: refactor this. This is gross
-class SkewedContext {
-    public TableScanNode table;
-    public DataType keyType;
-    public List<String> values;
-    public Set<Symbol> skewedSymbols;
-
-    public SkewedContext() {
-        this.skewedSymbols = new HashSet<>();
-    }
-
-    public void setTable(TableScanNode table, DataType keyType, List<String> values) {
-        this.table = table;
+    public SkewedContext(List<String> values, DataType keyType)
+    {
         this.keyType = keyType;
         this.values = values;
     }
@@ -102,7 +96,7 @@ public class SkewJoinOptimizer
     {
         List<List<String>> skewedJoinMetadata = getSkewedJoinMetadata(session);
 
-        if(skewedJoinMetadata.size() == 0) {
+        if (skewedJoinMetadata.size() == 0) {
             // No session information found, nothing to do.
             return plan;
         }
@@ -115,11 +109,11 @@ public class SkewJoinOptimizer
 
         JoinRewriter rewriter = new JoinRewriter(metadata, idAllocator, symbolAllocator, session);
 
-        return plan.accept(new PlanRewriter(session, metadata, skewedTables, rewriter), new SkewedContext());
+        return plan.accept(new PlanRewriter(session, metadata, skewedTables, rewriter), new HashMap<>());
     }
 
     private class PlanRewriter
-            extends PlanVisitor<PlanNode, SkewedContext>
+            extends PlanVisitor<PlanNode, Map<Symbol, SkewedContext>>
     {
         private final Session session;
         private final Metadata metadata;
@@ -134,33 +128,35 @@ public class SkewJoinOptimizer
             this.joinRewriter = rewriter;
         }
 
-        public PlanNode passThrough(PlanNode node, SkewedContext context) {
-            PlanNode child = Iterables.getOnlyElement(node.getSources());
-            PlanNode rewrittenChild = child.accept(this, context);
-            return replaceChildren(node, ImmutableList.of(rewrittenChild));
+        public PlanNode passThrough(PlanNode node, Map<Symbol, SkewedContext> context)
+        {
+            List<PlanNode> rewrittenChildren = node.getSources().stream()
+                    .map(child -> child.accept(this, context))
+                    .collect(Collectors.toList());
+            return replaceChildren(node, rewrittenChildren);
         }
 
         @Override
-        public PlanNode visitJoin(JoinNode node, SkewedContext context)
+        public PlanNode visitJoin(JoinNode node, Map<Symbol, SkewedContext> context)
         {
             // TODO : how do range joins behave ?
-            SkewedContext leftCtx = new SkewedContext();
-            SkewedContext rightCtx = new SkewedContext();
+            Map<Symbol, SkewedContext> leftCtx = new HashMap<>();
+            Map<Symbol, SkewedContext> rightCtx = new HashMap<>();
 
             PlanNode leftReWritten = node.getLeft().accept(this, leftCtx);
             PlanNode rightReWritten = node.getRight().accept(this, rightCtx);
 
             JoinNode newJoin = this.joinRewriter.rewriteJoin(node, leftReWritten, rightReWritten, Stream.empty());
 
-            if(leftCtx.skewedSymbols.size() > 0) {
-                Optional<SymbolReference> skewedLeftKey = newJoin.getCriteria().stream()
+            if (leftCtx.size() > 0) {
+                Optional<Symbol> leftKey = newJoin.getCriteria().stream()
                         .map(JoinNode.EquiJoinClause::getLeft)
-                        .filter(symbol->leftCtx.skewedSymbols.contains(symbol))
-                        .map(Symbol::toSymbolReference)
+                        .filter(leftCtx::containsKey)
                         .findFirst();
 
-                if(skewedLeftKey.isPresent()) {
-                    return this.joinRewriter.rewriteSkewedJoin(newJoin, skewedLeftKey.get(), leftCtx);
+                if (leftKey.isPresent()) {
+                    Symbol skewedLeftKey = leftKey.get();
+                    return this.joinRewriter.rewriteSkewedJoin(newJoin, skewedLeftKey.toSymbolReference(), leftCtx.get(skewedLeftKey));
                 }
             }
 
@@ -168,21 +164,21 @@ public class SkewJoinOptimizer
         }
 
         @Override
-        public PlanNode visitFilter(FilterNode node, SkewedContext context) {
+        public PlanNode visitFilter(FilterNode node, Map<Symbol, SkewedContext> context)
+        {
             return passThrough(node, context);
         }
 
         @Override
-        public PlanNode visitSort(SortNode node, SkewedContext context) {
+        public PlanNode visitSort(SortNode node, Map<Symbol, SkewedContext> context)
+        {
             return passThrough(node, context);
         }
 
         @Override
-        public PlanNode visitExchange(ExchangeNode node, SkewedContext context) {
-            // TODO correctly handle this
-            // for now passthrough the exchange node
-            List<PlanNode> children = node.getSources().stream().map(child -> child.accept(this, context)).collect(Collectors.toList());
-            return replaceChildren(node, children);
+        public PlanNode visitExchange(ExchangeNode node, Map<Symbol, SkewedContext> context)
+        {
+            return passThrough(node, context);
         }
 
 // Amogh's project, i believe this removes symbols from the context if they are not in the project. not sure if neeeded, lets discuss
@@ -200,53 +196,63 @@ public class SkewJoinOptimizer
 //        }
 
         @Override
-        public PlanNode visitProject(ProjectNode node, SkewedContext context) {
+        public PlanNode visitProject(ProjectNode node, Map<Symbol, SkewedContext> context)
+        {
             /*
                 If any symbol assignments refers to a skewed symbol then add that symbol to the set of skewed symbols.
             * */
-            // TODO Remove symbols that are unused.
             PlanNode child = node.getSource().accept(this, context);
+
+            // Symbols that will be removed by this projection.
+            Set<Symbol> outputSymbols = new HashSet<>(node.getOutputSymbols());
+            Set<Symbol> symbolsToRemove = new HashSet<>(node.getSource().getOutputSymbols());
+            symbolsToRemove.removeAll(outputSymbols);
+
+            // Add all symbols that refer to a skewed symbol.
             node.getAssignments().entrySet()
                     .forEach(entry -> {
                         Expression value = entry.getValue();
                         if (entry.getValue() instanceof SymbolReference) {
-                            if (context.skewedSymbols.contains(Symbol.from(value))) {
-                                context.skewedSymbols.add(entry.getKey());
+                            Symbol skewedSymbol = Symbol.from(value);
+                            if (context.containsKey(Symbol.from(value)) && !context.containsKey(entry.getKey())) {
+                                context.put(entry.getKey(), context.get(skewedSymbol));
                             }
                         }
                     });
+
+            // Remove symbols that are dropped in the projection
+            context.keySet().removeAll(symbolsToRemove);
+
             return replaceChildren(node, ImmutableList.of(child));
         }
 
         @Override
-        protected PlanNode visitPlan(PlanNode node, SkewedContext context)
+        protected PlanNode visitPlan(PlanNode node, Map<Symbol, SkewedContext> context)
         {
-            // for now passthrough the context
-            List<PlanNode> children = node.getSources().stream().map(child -> child.accept(this, context)).collect(Collectors.toList());
-            // create a new context for unsupported nodes like union.
-            //List<PlanNode> children = node.getSources().stream().map(child -> child.accept(this, new SkewedContext())).collect(Collectors.toList());
+            // For all other nodes don't let the context pass through.
+            List<PlanNode> children = node.getSources().stream()
+                    .map(child -> child.accept(this, new HashMap<>()))
+                    .collect(Collectors.toList());
             return replaceChildren(node, children);
         }
 
         @Override
-        public PlanNode visitTableScan(TableScanNode node, SkewedContext context)
+        public PlanNode visitTableScan(TableScanNode node, Map<Symbol, SkewedContext> context)
         {
             final String qualifiedTableName = metadata.getTableMetadata(session, node.getTable()).getQualifiedName().toString();
 
-            if(this.skewedTables.containsKey(qualifiedTableName)) {
+            if (this.skewedTables.containsKey(qualifiedTableName)) {
                 SkewJoinConfig skewConfig = this.skewedTables.get(qualifiedTableName);
                 Optional<Pair<Symbol, ColumnMetadata>> symbolAndMetadata = node.getAssignments().entrySet().stream()
-                        .map(entry -> new Pair<>(entry.getKey(),  metadata.getColumnMetadata(session, node.getTable(), entry.getValue())))
-                        .filter(entry -> entry.getA().getName().equals(skewConfig.getColumnName()) || entry.getB().getName().equals(skewConfig.getColumnName()))
+                        .map(entry -> new Pair<>(entry.getKey(), metadata.getColumnMetadata(session, node.getTable(), entry.getValue())))
+                        .filter(entry -> entry.getB().getName().equals(skewConfig.getColumnName()))
                         .findFirst();
                 symbolAndMetadata.ifPresent(m -> {
-                    // TODO Refactor this, its gross
-                    context.skewedSymbols.add(m.getA());
-                    context.setTable(node, toSqlType(m.getB().getType()), skewConfig.values);
+                    context.putIfAbsent(m.getA(), new SkewedContext(skewConfig.values, toSqlType(m.getB().getType())));
                 });
             }
 
-             return node;
+            return node;
         }
     }
 
