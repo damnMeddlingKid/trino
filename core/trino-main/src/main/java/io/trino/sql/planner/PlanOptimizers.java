@@ -52,6 +52,7 @@ import io.trino.sql.planner.iterative.rule.EvaluateEmptyIntersect;
 import io.trino.sql.planner.iterative.rule.EvaluateZeroSample;
 import io.trino.sql.planner.iterative.rule.ExtractDereferencesFromFilterAboveScan;
 import io.trino.sql.planner.iterative.rule.ExtractSpatialJoins;
+import io.trino.sql.planner.iterative.rule.FlattenMultiChannelAggregate;
 import io.trino.sql.planner.iterative.rule.GatherAndMergeWindows;
 import io.trino.sql.planner.iterative.rule.ImplementBernoulliSampleAsFilter;
 import io.trino.sql.planner.iterative.rule.ImplementExceptAll;
@@ -834,6 +835,17 @@ public class PlanOptimizers
                             // Must run before AddExchanges
                             .add(new DetermineTableScanNodePartitioning(metadata, nodePartitioningManager, taskCountEstimator))
                             .build()));
+
+            //FlattenMultiChannelAggregate should be run before AddExchanges and PushPartialAggregationThroughExchange
+            //This is because adding exchanges will split the aggregate into partial and final steps
+            //Its easier to rewrite the aggregate in a single step.
+            builder.add(new IterativeOptimizer(
+                    plannerContext,
+                    ruleStats,
+                    statsCalculator,
+                    costCalculator,
+                    ImmutableSet.of(
+                            new FlattenMultiChannelAggregate(plannerContext, metadata, typeAnalyzer))));
 
             builder.add(
                     new IterativeOptimizer(
